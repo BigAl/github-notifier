@@ -12,16 +12,37 @@ Notifies on review requests only (config.json "reasons"); other categories are s
 """
 import json
 import os
+import pathlib
 import subprocess
 import sys
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE, "config.json")
-STATE_PATH = os.path.join(BASE, "state.json")
-LOG_PATH = os.path.join(BASE, "notifier.log")
+BASE = pathlib.Path(__file__).resolve().parent
+
+
+def _xdg_dir(env_name, default):
+    """Directory from env override, else an XDG-style default."""
+    if os.environ.get(env_name):
+        return pathlib.Path(os.environ[env_name]).expanduser()
+    return pathlib.Path(default).expanduser()
+
+
+# Legacy layout (config.json beside the script) keeps everything beside the
+# script; otherwise config lives under ~/.config and state/log under
+# ~/.local/state (or their XDG overrides).
+_LEGACY = (BASE / "config.json").exists()
+CONFIG_DIR = BASE if _LEGACY else _xdg_dir("GHN_CONFIG_DIR", "~/.config/gh-notifier")
+STATE_DIR = (
+    BASE if _LEGACY
+    else _xdg_dir("GHN_STATE_DIR", os.path.join(
+        os.environ.get("XDG_STATE_HOME", "~/.local/state"), "gh-notifier"))
+)
+
+CONFIG_PATH = str(CONFIG_DIR / "config.json")
+STATE_PATH = str(STATE_DIR / "state.json")
+LOG_PATH = str(STATE_DIR / "notifier.log")
 
 STATE_MAX_KEYS = 2000
 
@@ -346,6 +367,12 @@ def handle_command(cmd, state, config):
 
 
 def main():
+    for d in (CONFIG_DIR, STATE_DIR):
+        os.makedirs(d, exist_ok=True)
+    if not os.path.exists(CONFIG_PATH):
+        print("No config at %s - copy config.example.json there or run install.sh"
+              % CONFIG_PATH, file=sys.stderr)
+        return 2
     config = load_config()
     state = load_state() or {"seen": []}
     if "--force" not in sys.argv and not in_work_hours():

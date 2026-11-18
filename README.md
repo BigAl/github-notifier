@@ -21,21 +21,45 @@ minutes (crontab) and posts filtered items to a Slack DM.
 | `state.json` | no | seen-thread state (dedupe + queue cursor) |
 | `notifier.log` | no | one line per cron run |
 
+## Install (Linux)
+
+```
+git clone https://github.com/BigAl/github-notifier.git
+cd github-notifier
+bash install.sh
+```
+
+`install.sh` checks for `python3`/`gh`, copies the script to
+`~/.local/share/github-notifier`, puts a `github-notifier` command on PATH,
+prompts once for the Slack channel ID / user ID / bot-token path, seeds state,
+and offers to add the crontab line. Re-run it after a `git pull` to update the
+code (your config and state are kept).
+
+Prefer pipx? The repo is also a standard Python package:
+
+```
+pipx install git+https://github.com/BigAl/github-notifier.git
+```
+
+Then create `~/.config/gh-notifier/config.json` (copy of `config.example.json`,
+filled in); state and log go to `~/.local/state/gh-notifier/`.
+
+Paths can be moved with `GHN_CONFIG_DIR` / `GHN_STATE_DIR` / `GHN_PREFIX`.
+
 ## Setup
 
-1. Build against the Slack API: create a Slack app with a bot token (`chat:write`,
-   `channels:history` or `im:history` for the DM), install it, open a DM with the
-   bot, and put the channel ID, your user ID and the token file path in
-   `config.json`.
+1. Create a Slack app with a bot token (`chat:write`, `channels:history` or
+   `im:history` for the DM), install it, open a DM with the bot, and put the
+   channel ID, your user ID and the token file path in `config.json`.
 2. Schedule it (every 5 minutes):
-   `*/5 * * * * /usr/bin/python3 /path/to/github-notifier/notifier.py >/dev/null 2>&1`
+   `*/5 * * * * github-notifier >/dev/null 2>&1`
 3. First run seeds state silently; after that new items are posted.
 
 ## Run / test
 
 ```
-python3 notifier.py            # one check (respect quiet hours)
-python3 notifier.py --force    # run a check now, ignoring quiet hours
+github-notifier            # one check (quiet hours respected)
+github-notifier --force    # run a check now, ignoring quiet hours
 python3 -m pytest test_notifier.py
 ```
 

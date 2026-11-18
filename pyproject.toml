@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "github-notifier"
+version = "0.1.0"
+description = "GitHub review-request notifications to a Slack DM, Mon-Fri work hours only"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+
+[project.scripts]
+github-notifier = "notifier:main"
+
+[tool.setuptools]
+py-modules = ["notifier"]
