@@ -1,0 +1,8 @@
+# Live runtime/product files - never commit
+config.json
+state.json
+notifier.log
+
+# Python
+__pycache__/
+.pytest_cache/

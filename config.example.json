@@ -1,0 +1,7 @@
+{
+  "channel": "D0YOURDMCHANNELID",
+  "token_file": "~/.config/slack-mcp/bot-token",
+  "user_id": "U0YOURSLACKUSERID",
+  "reasons": ["review_requested"],
+  "max_messages": 8
+}
