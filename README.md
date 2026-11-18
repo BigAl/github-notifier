@@ -35,14 +35,15 @@ prompts once for the Slack channel ID / user ID / bot-token path, seeds state,
 and offers to add the crontab line. Re-run it after a `git pull` to update the
 code (your config and state are kept).
 
-Prefer pipx? The repo is also a standard Python package:
+Prefer uv (or pipx)? Standard Python package, no dependencies:
 
 ```
-pipx install git+https://github.com/BigAl/github-notifier.git
+uv tool install git+https://github.com/BigAl/github-notifier.git    # or: pipx install ...
 ```
 
 Then create `~/.config/gh-notifier/config.json` (copy of `config.example.json`,
-filled in); state and log go to `~/.local/state/gh-notifier/`.
+filled in); state and log go to `~/.local/state/gh-notifier/`. `install.sh`
+does the same wiring with prompts if you'd rather not hand-edit.
 
 Paths can be moved with `GHN_CONFIG_DIR` / `GHN_STATE_DIR` / `GHN_PREFIX`.
 
