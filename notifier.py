@@ -15,6 +15,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -49,6 +50,13 @@ STATE_MAX_KEYS = 2000
 
 # ---------- pure logic (covered by test_notifier.py) ----------
 
+# A quiet night/weekend leaves the cursor idle for days; do not reseed on it
+# or Monday morning's buffered backlog would be silently dropped.
+# (Fri 19:00 -> Mon 07:00 is ~60h; 8 days leaves margin. A box off longer
+#  than this reseeds and loses the queue - acceptable.)
+STALE_AFTER_SECONDS = 8 * 24 * 3600
+
+
 def filter_threads(threads, allowed_reasons):
     """Keep only notification threads whose reason is allowed."""
     return [t for t in threads if t.get("reason") in allowed_reasons]
@@ -62,6 +70,58 @@ def thread_key(thread):
 def is_new(thread, seen):
     """True if this thread state has not been posted before."""
     return thread_key(thread) not in seen
+
+
+# Any activity on a PR (new commit, comment, CI) bumps updated_at and makes
+# the same review request look brand new again. One notification per PR per
+# day keeps an active PR from spamming while still allowing a fresh
+# review-request to come through the next day.
+NOTIFY_COOLDOWN_SECONDS = 24 * 3600
+
+
+def apply_cooldown(threads, last_notified, now_ts):
+    """Split fresh threads into (to_post, suppressed_keys).
+
+    A thread whose id was notified within NOTIFY_COOLDOWN_SECONDS is
+    suppressed; its thread_key must still be recorded as seen by the caller
+    so the same update never gets re-evaluated.
+    """
+    to_post, suppressed = [], []
+    for t in threads:
+        last = last_notified.get(str(t.get("id")))
+        if last is not None and now_ts - last < NOTIFY_COOLDOWN_SECONDS:
+            suppressed.append(thread_key(t))
+        else:
+            to_post.append(t)
+    return to_post, suppressed
+
+
+def backfill_last_notified(seen):
+    """Per-PR last-update epoch derived from seen keys, for legacy states.
+
+    Seen keys are "id@updated_at"; notifications post within minutes of
+    updated_at, so the latest update per id approximates the last notification.
+    """
+    def epoch(ts):
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+
+    out = {}
+    for key in seen:
+        tid, _, upd = key.partition("@")
+        ts = epoch(upd)
+        if ts is None:
+            continue
+        if ts > out.get(tid, 0):
+            out[tid] = ts
+    return out
+
+
+def prune_last_notified(last_notified, now_ts, max_age=STALE_AFTER_SECONDS):
+    """Drop cooldown entries older than a state reseed can last anyway."""
+    return {tid: ts for tid, ts in last_notified.items() if now_ts - ts <= max_age}
 
 
 LABELS = {
@@ -111,12 +171,6 @@ def collect_messages(threads, seen, cap):
         posted.append("⏩ %d more — https://github.com/notifications" % (len(fresh) - cap))
     return posted
 
-
-# A quiet night/weekend leaves the cursor idle for days; do not reseed on it
-# or Monday morning's buffered backlog would be silently dropped.
-# (Fri 19:00 -> Mon 07:00 is ~60h; 8 days leaves margin. A box off longer
-#  than this reseeds and loses the queue - acceptable.)
-STALE_AFTER_SECONDS = 8 * 24 * 3600
 
 # Quiet hours (archie-style): Mon-Fri 07:00-18:59, machine local time.
 WORK_HOUR_MIN = 7
@@ -231,6 +285,9 @@ def load_state():
 
 def save_state(state):
     state["seen"] = state["seen"][-STATE_MAX_KEYS:]
+    if "last_notified" in state:
+        state["last_notified"] = prune_last_notified(
+            state["last_notified"], time.time())
     tmp = STATE_PATH + ".tmp"
     with open(tmp, "w") as f:
         json.dump(state, f)
@@ -375,6 +432,8 @@ def main():
         return 2
     config = load_config()
     state = load_state() or {"seen": []}
+    if "last_notified" not in state:
+        state["last_notified"] = backfill_last_notified(state["seen"])
     if "--force" not in sys.argv and not in_work_hours():
         log("quiet hours: skipping check")
         return 0
@@ -391,7 +450,12 @@ def main():
         log("ERROR fetch: %s" % e)
         return 1
     allowed = filter_threads(threads, config["reasons"])
-    fresh = [t for t in allowed if is_new(t, set(state["seen"]))]
+    post_now, suppressed_keys = apply_cooldown(
+        [t for t in allowed if is_new(t, set(state["seen"]))],
+        state["last_notified"], time.time())
+    # Suppressed updates are never to be posted, but must still mark their
+    # thread state as seen or every tick would re-consider them.
+    state["seen"] = state["seen"] + suppressed_keys
 
     if action in ("seed", "reseed"):
         state["seen"] = list(set(state["seen"]) | {thread_key(t) for t in allowed})
@@ -399,25 +463,28 @@ def main():
         save_state(state)
         log("%s: recorded %d threads, posted nothing" % (action, len(allowed)))
     elif paused:
-        if fresh:
-            log("paused: %d new buffered, cursor not advanced" % len(fresh))
+        if post_now:
+            log("paused: %d new buffered, cursor not advanced" % len(post_now))
         save_state(state)
     else:
-        messages = collect_messages(allowed, set(state["seen"]), config["max_messages"])
+        messages = collect_messages(post_now, set(state["seen"]), config["max_messages"])
         posted = 0
         for i, msg in enumerate(messages):
             try:
                 slack_post(token, config["channel"], msg)
                 posted += 1
-                if i < len(fresh):
-                    state["seen"].append(thread_key(fresh[i]))
+                if i < len(post_now):
+                    t = post_now[i]
+                    state["seen"].append(thread_key(t))
+                    state["last_notified"][str(t.get("id"))] = int(time.time())
             except Exception as e:
                 failures += 1
                 log("ERROR post: %s" % e)
         if failures == 0:
             state["last_success"] = now
         save_state(state)
-        log("run: %d new, posted %d, failed %d" % (len(fresh), posted, failures))
+        log("run: %d new, posted %d, skipped %d (cooldown), failed %d" % (
+            len(post_now) + len(suppressed_keys), posted, len(suppressed_keys), failures))
 
     # 2) DM commands — processed even while paused (that's how you resume)
     try:

@@ -6,7 +6,9 @@ minutes (crontab) and posts filtered items to a Slack DM.
 - Scope: `review_requested` only (config.json `"reasons"`)
 - Quiet hours: posts Mon–Fri 07:00–18:59 machine-local only; overnight and
   weekend items are delivered at the next in-hours tick (nothing is dropped)
-- Dedupe: per-thread `id` + `updated_at`, so a re-requested PR re-notifies
+- Dedupe: per-thread `id` + `updated_at`; any further update to a PR you're
+  already reviewing is held back for 24h since the last post about that PR
+  (commit/comment/CI churn doesn't re-post; a re-request the next day does)
 - Runs via the `gh` CLI (`gh api notifications`), so auth is inherited from
   your logged-in `gh` session
 

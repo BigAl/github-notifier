@@ -4,12 +4,13 @@ Run: python3 -m pytest test_notifier.py -v
 """
 import pytest
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from notifier import (
     filter_threads, is_new, thread_key, build_message, collect_messages,
     decide_action, parse_command, format_pending_report, format_help,
     select_commands, in_work_hours,
+    apply_cooldown, backfill_last_notified, prune_last_notified,
 )
 
 
@@ -271,3 +272,77 @@ def test_select_commands_returns_chronological_order():
         {"ts": "1.0", "user": ALAN, "text": "resume"},
     ]
     assert select_commands(msgs, ALAN) == [("1.0", "resume"), ("2.0", "pause")]
+
+
+# ---------- 24h per-PR cooldown ----------
+# GitHub bumps updated_at on any activity (new commit, comment, CI); without a
+# cooldown the same review request re-posts every time the PR moves.
+
+NOW = 1_800_000_000
+
+
+def test_cooldown_allows_first_notification_of_a_pr():
+    t = make_thread(reason="review_requested", id="99", updated="2026-11-19T05:00:00Z")
+    post, suppressed = apply_cooldown([t], last_notified={}, now_ts=NOW)
+    assert post == [t]
+    assert suppressed == []
+
+
+def test_cooldown_suppresses_active_pr_within_24h():
+    t = make_thread(reason="review_requested", id="99", updated="2026-11-19T05:00:00Z")
+    post, suppressed = apply_cooldown([t], last_notified={"99": NOW - 3600}, now_ts=NOW)
+    assert post == []
+    assert suppressed == [thread_key(t)]
+
+
+def test_cooldown_allows_pr_again_after_24h():
+    t = make_thread(reason="review_requested", id="99", updated="2026-11-19T05:00:00Z")
+    post, suppressed = apply_cooldown(
+        [t], last_notified={"99": NOW - 24 * 3600 - 1}, now_ts=NOW)
+    assert post == [t]
+    assert suppressed == []
+
+
+def test_cooldown_tracks_prs_independently():
+    a = make_thread(reason="review_requested", id="1", updated="2026-11-19T05:00:00Z")
+    b = make_thread(reason="review_requested", id="2", updated="2026-11-19T05:00:00Z")
+    post, suppressed = apply_cooldown([a, b], last_notified={"1": NOW - 60}, now_ts=NOW)
+    assert post == [b]
+    assert suppressed == [thread_key(a)]
+
+
+# ---------- legacy state backfill ----------
+# States written before the cooldown have no last_notified; recover per-PR
+# recency from the seen keys ("id@updated_at" — notifications post within
+# minutes of updated_at).
+
+def test_backfill_derives_last_notified_from_seen_keys():
+    seen = [
+        "7@2026-11-18T05:00:00Z",
+        "7@2026-11-19T05:00:00Z",  # latest update wins
+        "8@2026-11-10T00:00:00Z",
+    ]
+    assert backfill_last_notified(seen) == {
+        "7": datetime(2026, 11, 19, 5, 0, 0, tzinfo=timezone.utc).timestamp(),
+        "8": datetime(2026, 11, 10, 0, 0, 0, tzinfo=timezone.utc).timestamp(),
+    }
+
+
+def test_backfill_ignores_malformed_keys():
+    assert backfill_last_notified(["7@", "no-at-sign", ""]) == {}
+
+
+def test_backfill_empty_seen_gives_empty_map():
+    assert backfill_last_notified([]) == {}
+
+
+# ---------- pruning ----------
+
+def test_prune_drops_entries_older_than_8_days():
+    last = {"1": NOW - 9 * 24 * 3600, "2": NOW - 100}
+    assert prune_last_notified(last, NOW) == {"2": NOW - 100}
+
+
+def test_prune_keeps_recent_entries():
+    last = {"1": NOW - 60}
+    assert prune_last_notified(last, NOW) == last
