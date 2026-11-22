@@ -11,6 +11,7 @@ from notifier import (
     decide_action, parse_command, format_pending_report, format_help,
     select_commands, in_work_hours,
     apply_cooldown, backfill_last_notified, prune_last_notified,
+    drop_closed_prs,
 )
 
 
@@ -346,3 +347,44 @@ def test_prune_drops_entries_older_than_8_days():
 def test_prune_keeps_recent_entries():
     last = {"1": NOW - 60}
     assert prune_last_notified(last, NOW) == last
+
+
+# ---------- closed/merged PRs ----------
+
+def test_drop_closed_skips_closed_pr():
+    t = make_thread(id="1", url="https://api.github.com/repos/acme/widgets/pulls/1")
+    keep, dropped = drop_closed_prs([t], lambda url: "closed")
+    assert keep == []
+    assert dropped == [thread_key(t)]
+
+
+def test_drop_closed_keeps_open_pr():
+    t = make_thread(id="1")
+    keep, dropped = drop_closed_prs([t], lambda url: "open")
+    assert keep == [t]
+    assert dropped == []
+
+
+def test_drop_closed_keeps_pr_when_lookup_fails():
+    def boom(url):
+        raise RuntimeError("gh api failed")
+    t = make_thread(id="1")
+    keep, dropped = drop_closed_prs([t], boom)
+    assert keep == [t]
+    assert dropped == []
+
+
+def test_drop_closed_ignores_non_pr_subjects():
+    t = make_thread(id="1", subject_type="Issue")
+    calls = []
+    keep, dropped = drop_closed_prs([t], lambda url: calls.append(url) or "closed")
+    assert keep == [t]
+    assert calls == []
+
+
+def test_drop_closed_passes_subject_api_url():
+    url = "https://api.github.com/repos/acme/widgets/pulls/7"
+    t = make_thread(id="1", url=url)
+    seen = []
+    drop_closed_prs([t], lambda u: seen.append(u) or "open")
+    assert seen == [url]

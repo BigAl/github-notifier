@@ -96,6 +96,34 @@ def apply_cooldown(threads, last_notified, now_ts):
     return to_post, suppressed
 
 
+def drop_closed_prs(threads, fetch_pr_state):
+    """Split threads into (to_post, dropped_keys), dropping closed/merged PRs.
+
+    Items held over quiet hours can go stale (the PR merged or closed before
+    the next in-hours tick), so each PR is checked just before posting.
+    fetch_pr_state(api_url) returns the PR's "state" ("open"/"closed"; merged
+    PRs are "closed"). A failed lookup keeps the item: better a stale ping
+    than a lost one. Dropped keys must be recorded as seen by the caller.
+    """
+    to_post, dropped = [], []
+    for t in threads:
+        subject = t.get("subject", {})
+        url = subject.get("url")
+        if subject.get("type") != "PullRequest" or not url:
+            to_post.append(t)
+            continue
+        try:
+            state = fetch_pr_state(url)
+        except Exception:
+            to_post.append(t)
+            continue
+        if state == "closed":
+            dropped.append(thread_key(t))
+        else:
+            to_post.append(t)
+    return to_post, dropped
+
+
 def backfill_last_notified(seen):
     """Per-PR last-update epoch derived from seen keys, for legacy states.
 
@@ -315,6 +343,17 @@ def fetch_threads(since=None):
     return json.loads(proc.stdout)
 
 
+def fetch_pr_state(api_url):
+    """PR state ("open"/"closed") for an api.github.com pull request URL."""
+    proc = subprocess.run(
+        ["gh", "api", api_url, "--jq", ".state"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError("gh api failed: %s" % proc.stderr.strip())
+    return proc.stdout.strip()
+
+
 def fetch_unread():
     """Unread notification threads only (the API default)."""
     proc = subprocess.run(
@@ -456,6 +495,10 @@ def main():
     # Suppressed updates are never to be posted, but must still mark their
     # thread state as seen or every tick would re-consider them.
     state["seen"] = state["seen"] + suppressed_keys
+    closed_keys = []
+    if action == "run" and not paused and post_now:
+        post_now, closed_keys = drop_closed_prs(post_now, fetch_pr_state)
+        state["seen"] = state["seen"] + closed_keys
 
     if action in ("seed", "reseed"):
         state["seen"] = list(set(state["seen"]) | {thread_key(t) for t in allowed})
@@ -483,8 +526,9 @@ def main():
         if failures == 0:
             state["last_success"] = now
         save_state(state)
-        log("run: %d new, posted %d, skipped %d (cooldown), failed %d" % (
-            len(post_now) + len(suppressed_keys), posted, len(suppressed_keys), failures))
+        log("run: %d new, posted %d, skipped %d (cooldown), %d (closed), failed %d" % (
+            len(post_now) + len(suppressed_keys) + len(closed_keys), posted,
+            len(suppressed_keys), len(closed_keys), failures))
 
     # 2) DM commands — processed even while paused (that's how you resume)
     try:

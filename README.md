@@ -9,6 +9,9 @@ minutes (crontab) and posts filtered items to a Slack DM.
 - Dedupe: per-thread `id` + `updated_at`; any further update to a PR you're
   already reviewing is held back for 24h since the last post about that PR
   (commit/comment/CI churn doesn't re-post; a re-request the next day does)
+- Stale check: each PR is looked up just before posting and skipped if it has
+  already been merged or closed (mainly catches items held over quiet hours);
+  if the lookup fails the item is posted anyway
 - Runs via the `gh` CLI (`gh api notifications`), so auth is inherited from
   your logged-in `gh` session
 
